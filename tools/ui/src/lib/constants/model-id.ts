@@ -23,9 +23,9 @@ export const MODEL_QUANTIZATION_SEGMENT_RE =
 export const MODEL_CUSTOM_QUANTIZATION_PREFIX_RE = /^UD$/i;
 
 /**
- * Matches a parameter-count segment, e.g. `7B`, `1.5b`, `120M`.
+ * Matches a parameter-count segment, e.g. `7B`, `1.5b`, `120M`, `E2B`, `E4B`.
  */
-export const MODEL_PARAMS_RE = /^\d+(\.\d+)?[BbMmKkTt]$/;
+export const MODEL_PARAMS_RE = /^[Ee]?\d+(\.\d+)?[BbMmKkTt]$/;
 
 /**
  * Matches an activated-parameter-count segment, e.g. `A10B`, `a2.4b`.

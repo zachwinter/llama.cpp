@@ -225,7 +225,24 @@ int llama_server(int argc, char ** argv) {
         ctx_http.post("/cors-proxy",      ex_wrapper(proxy_handler_post));
     }
     // EXPERIMENTAL built-in tools
-    if (!params.server_tools.empty()) {
+    if (!params.tool_server_url.empty()) {
+        // proxy mode: forward /tools to a remote tool server (e.g. llama-tool-server)
+        SRV_WRN("%s", "-----------------\n");
+        SRV_WRN("Proxying /tools to remote tool server: %s\n", params.tool_server_url.c_str());
+        SRV_WRN("%s", "This feature is EXPERIMENTAL and may be changed in the future\n");
+        SRV_WRN("%s", "-----------------\n");
+        common_http_url tool_url = common_http_parse_url(params.tool_server_url);
+        ctx_http.get ("/tools", ex_wrapper([=](const server_http_req & req) -> server_http_res_ptr {
+            return std::make_unique<server_http_proxy>(
+                "GET", tool_url.scheme, tool_url.host, tool_url.port,
+                "/tools", req.headers, req.body, req.files, req.should_stop, 60, 60);
+        }));
+        ctx_http.post("/tools", ex_wrapper([=](const server_http_req & req) -> server_http_res_ptr {
+            return std::make_unique<server_http_proxy>(
+                "POST", tool_url.scheme, tool_url.host, tool_url.port,
+                "/tools", req.headers, req.body, req.files, req.should_stop, 60, 60);
+        }));
+    } else if (!params.server_tools.empty()) {
         try {
             tools.setup(params.server_tools);
         } catch (const std::exception & e) {

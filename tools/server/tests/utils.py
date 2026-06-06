@@ -110,6 +110,8 @@ class ServerProcess:
     webui_mcp_proxy: bool = False
     backend_sampling: bool = False
     gcp_compat: bool = False
+    server_tools: str | None = None
+    tool_server_url: str | None = None
 
     # session variables
     process: subprocess.Popen | None = None
@@ -257,6 +259,10 @@ class ServerProcess:
             server_args.append("--backend_sampling")
         if self.gcp_compat:
             env["AIP_MODE"] = "PREDICTION"
+        if self.server_tools:
+            server_args.extend(["--tools", self.server_tools])
+        if self.tool_server_url:
+            server_args.extend(["--tool-server-url", self.tool_server_url])
 
         args = [str(arg) for arg in [server_path, *server_args]]
         print(f"tests: starting server with: {' '.join(args)}")

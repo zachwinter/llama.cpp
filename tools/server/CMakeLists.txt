@@ -57,3 +57,13 @@ install(TARGETS ${TARGET} RUNTIME)
 
 target_link_libraries(${TARGET} PRIVATE llama-server-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+# llama-tool-server: standalone tool execution server (no model/GPU)
+
+set(TARGET llama-tool-server)
+
+add_executable(${TARGET} tool-server-main.cpp)
+install(TARGETS ${TARGET} RUNTIME)
+
+target_link_libraries(${TARGET} PRIVATE llama-server-impl)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

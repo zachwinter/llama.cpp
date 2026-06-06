@@ -2934,6 +2934,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.server_tools = parse_csv_row(value);
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOOLS"));
+    add_opt(common_arg(
+        {"--tool-server-url"}, "URL",
+        "experimental: proxy /tools requests to a remote tool server (e.g. llama-tool-server)\n"
+        "when set, --tools is ignored and no local tools are loaded\n"
+        "example: http://localhost:8082",
+        [](common_params & params, const std::string & value) {
+            params.tool_server_url = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOOL_SERVER_URL"));
     // Deprecated: use --ui/--no-ui instead (kept for backward compat)
     add_opt(common_arg(
         {"--webui"},

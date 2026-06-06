@@ -638,6 +638,7 @@ struct common_params {
 
     // enable built-in tools
     std::vector<std::string> server_tools;
+    std::string tool_server_url; // if set, proxy /tools to a remote tool server
 
     // router server configs
     std::string models_dir    = ""; // directory containing models for the router server
