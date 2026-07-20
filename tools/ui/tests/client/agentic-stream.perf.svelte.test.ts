@@ -17,6 +17,9 @@ import AgenticPerfWrapper from './components/AgenticPerfWrapper.svelte';
 import ChatMessagesPerfWrapper from './components/ChatMessagesPerfWrapper.svelte';
 import { perfState } from './components/agentic-perf-state.svelte';
 import { conversationsStore } from '$lib/stores/conversations.svelte';
+import { chatStore } from '$lib/stores/chat.svelte';
+import { settingsStore } from '$lib/stores/settings.svelte';
+import { SETTINGS_KEYS } from '$lib/constants';
 import type { DatabaseMessage } from '$lib/types';
 import { MessageRole } from '$lib/enums';
 
@@ -355,6 +358,143 @@ async function measureConversation(
 	});
 }
 
+// --- processing-state subscription leak ------------------------------------
+// `useProcessingState()` is instantiated per assistant message and subscribes to
+// the global activeProcessingState once `startMonitoring()` runs. That happens
+// while the message is the last assistant one and actively processing - i.e.
+// during its own turn. `stopMonitoring()` is never called, so every message that
+// has ever generated stays subscribed, and each one re-runs its derived plus two
+// effects on every `onTimings` tick (once per streamed chunk).
+//
+// Mounting fresh components cannot reproduce this: the conversation has to be
+// built turn by turn, as the real app does, so each assistant message is briefly
+// "last + processing" before the next one arrives.
+
+async function measureProcessingLeak(label: string, priorTurns: number, tokens = 60) {
+	const convId = 'perf-conv';
+
+	// Off by default, so without this the statistics component - the main consumer
+	// of processingState - never mounts and the fixture understates the cost.
+	settingsStore.updateConfig(SETTINGS_KEYS.SHOW_MESSAGE_STATS, true);
+
+	conversationsStore.activeMessages = [];
+	chatStore.setActiveProcessingConversation(convId);
+
+	const { unmount } = render(ChatMessagesPerfWrapper);
+	await tick();
+
+	// Drive each turn to completion so its hook starts monitoring and is then
+	// superseded, exactly as it would be during a real session.
+	chatStore.isLoading = true;
+
+	// If the processing indicator never renders, no hook ever calls
+	// startMonitoring() and this whole fixture measures nothing. Fail loudly
+	// rather than reporting a flat line that looks like "no leak".
+	let sawProcessingIndicator = false;
+
+	for (let i = 0; i < priorTurns; i++) {
+		conversationsStore.addMessageToActive(
+			baseMessage({ role: MessageRole.USER, content: `Question ${i}` })
+		);
+		const assistant = baseMessage({ role: MessageRole.ASSISTANT, content: '' });
+		conversationsStore.addMessageToActive(assistant);
+
+		// Empty content + last assistant + loading => processing info shows =>
+		// startMonitoring().
+		await tick();
+		await nextFrame();
+
+		if (document.querySelector('.shimmer-text')) sawProcessingIndicator = true;
+
+		const idx = conversationsStore.findMessageIndex(assistant.id);
+		// Give the finished turn a model and timings so ChatMessageAssistantStatistics
+		// actually mounts - it is the component that consumes processingState, and
+		// without these the fixture would leave the real consumer out of the tree.
+		conversationsStore.updateMessageAtIndex(idx, {
+			content: `Answer ${i}: ${blob(256, `a${i}`)}`,
+			model: 'test-model.gguf',
+			timings: { prompt_n: 100, prompt_ms: 50, predicted_n: 200, predicted_ms: 1000 }
+		});
+		await tick();
+	}
+
+	if (!sawProcessingIndicator) {
+		throw new Error(
+			'measureProcessingLeak: processing indicator never rendered, so no hook started ' +
+				'monitoring - the fixture is not reproducing the leak and its numbers are meaningless'
+		);
+	}
+
+	// The stats rows are the real consumers of processingState; if they are absent
+	// the fixture understates the leak just as badly as if nothing monitored.
+	const statsRows = document.querySelectorAll('[data-slot="tooltip-trigger"]').length;
+
+	if (priorTurns > 1 && statsRows === 0) {
+		throw new Error(
+			'measureProcessingLeak: no statistics rows mounted - showMessageStats did not take ' +
+				'effect, so the fixture is not exercising the processingState consumers'
+		);
+	}
+
+	const streaming = baseMessage({ role: MessageRole.ASSISTANT, content: '' });
+	conversationsStore.addMessageToActive(streaming);
+	await tick();
+
+	const idx = conversationsStore.findMessageIndex(streaming.id);
+	const CHUNK = 'The quick brown fox jumps over the lazy dog. ';
+	let accumulated = '';
+	const durations: number[] = [];
+	const wallStart = performance.now();
+
+	for (let i = 0; i < tokens; i++) {
+		accumulated += CHUNK;
+
+		const t0 = performance.now();
+		conversationsStore.updateMessageAtIndex(idx, { content: accumulated });
+		// llama-server sends timings with each chunk; this is what wakes every
+		// still-monitoring hook.
+		chatStore.updateProcessingStateFromTimings(
+			{
+				prompt_n: 100,
+				prompt_ms: 50,
+				predicted_n: i + 1,
+				predicted_per_second: 42 + i,
+				cache_n: 0
+			},
+			convId
+		);
+		await tick();
+		void document.body.offsetHeight;
+		durations.push(performance.now() - t0);
+
+		await nextFrame();
+	}
+
+	await nextFrame();
+	await nextFrame();
+	const wall = performance.now() - wallStart;
+
+	await unmount();
+	chatStore.isLoading = false;
+	chatStore.clearProcessingState(convId);
+	chatStore.setActiveProcessingConversation(null);
+	conversationsStore.activeMessages = [];
+	settingsStore.updateConfig(SETTINGS_KEYS.SHOW_MESSAGE_STATS, false);
+
+	durations.sort((a, b) => a - b);
+	const total = durations.reduce((a, b) => a + b, 0);
+
+	results.push({
+		label,
+		tokens,
+		mean: total / durations.length,
+		p95: durations[Math.floor(durations.length * 0.95)],
+		max: durations[durations.length - 1],
+		total,
+		wall
+	});
+}
+
 // --- the matrix -----------------------------------------------------------
 // Sequential, in one test, so the table prints together and the samples do not
 // interleave with other suites competing for the main thread.
@@ -390,6 +530,12 @@ describe('agentic streaming perf', () => {
 		// Same, but each prior assistant turn carries a resolved tool call.
 		await measureConversation('convo: 10 prior, agentic', 10, 60, true);
 		await measureConversation('convo: 40 prior, agentic', 40, 60, true);
+
+		// Processing-state subscription leak: cost should rise with the number of
+		// completed turns if old hooks are still monitoring.
+		await measureProcessingLeak('timings: 1 prior turn', 1);
+		await measureProcessingLeak('timings: 10 prior turns', 10);
+		await measureProcessingLeak('timings: 25 prior turns', 25);
 
 		// Message length: MarkdownContent re-parses the whole accumulated string
 		// each frame, so per-token cost should climb as the response grows.
