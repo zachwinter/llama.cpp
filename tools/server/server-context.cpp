@@ -39,6 +39,157 @@ using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
+// Context checkpoints are stored in a sidecar file next to the slot state file.
+//
+// llama_state_seq_save_file serializes the token list and the sequence's KV
+// cells, but not slot.prompt.checkpoints. For hybrid/recurrent models the
+// recurrent state cannot be partially rewound, so a checkpoint is the only way
+// to roll back to a prefix - without one, a restored slot matches the prompt
+// and is then forced to reprocess it in full (see the do_reset path in
+// update_slots). Keeping the checkpoints beside the state file makes a restored
+// slot behave like one that was never evicted.
+//
+// A missing or rejected sidecar is not an error: the slot simply restores with
+// no checkpoints, which is the previous behaviour.
+
+static constexpr uint32_t SLOT_CKPT_MAGIC   = 0x54504b43; // "CKPT"
+static constexpr uint32_t SLOT_CKPT_VERSION = 1;
+
+static std::string server_slot_ckpt_path(const std::string & filepath) {
+    return filepath + ".ckpt";
+}
+
+template <typename T> static void server_ckpt_write_pod(std::ofstream & os, const T & v) {
+    os.write(reinterpret_cast<const char *>(&v), sizeof(T));
+}
+
+template <typename T> static bool server_ckpt_read_pod(std::ifstream & is, T & v) {
+    is.read(reinterpret_cast<char *>(&v), sizeof(T));
+    return static_cast<bool>(is);
+}
+
+static void server_ckpt_write_buf(std::ofstream & os, const std::vector<uint8_t> & buf) {
+    const uint64_t n = buf.size();
+    server_ckpt_write_pod(os, n);
+    if (n > 0) {
+        os.write(reinterpret_cast<const char *>(buf.data()), n);
+    }
+}
+
+static bool server_ckpt_read_buf(std::ifstream & is, std::vector<uint8_t> & buf, uint64_t n_max) {
+    uint64_t n = 0;
+    if (!server_ckpt_read_pod(is, n) || n > n_max) {
+        return false;
+    }
+    buf.resize(n);
+    if (n > 0) {
+        is.read(reinterpret_cast<char *>(buf.data()), n);
+    }
+    return static_cast<bool>(is);
+}
+
+// Always writes, even with zero checkpoints, so a stale sidecar can never be
+// paired with a newer state file.
+static void server_slot_ckpt_save(
+        const std::string & filepath,
+        const std::list<common_prompt_checkpoint> & checkpoints,
+        uint64_t n_tokens_prompt) {
+    const std::string path = server_slot_ckpt_path(filepath);
+
+    std::ofstream os(path, std::ios::binary | std::ios::trunc);
+    if (!os) {
+        SRV_WRN("failed to open '%s' for writing, context checkpoints will not be saved\n", path.c_str());
+        return;
+    }
+
+    server_ckpt_write_pod(os, SLOT_CKPT_MAGIC);
+    server_ckpt_write_pod(os, SLOT_CKPT_VERSION);
+    server_ckpt_write_pod(os, n_tokens_prompt);
+    server_ckpt_write_pod(os, static_cast<uint64_t>(checkpoints.size()));
+
+    for (const auto & cur : checkpoints) {
+        server_ckpt_write_pod(os, static_cast<int64_t>(cur.n_tokens));
+        server_ckpt_write_pod(os, static_cast<int32_t>(cur.id_task));
+        server_ckpt_write_pod(os, static_cast<int32_t>(cur.pos_min));
+        server_ckpt_write_pod(os, static_cast<int32_t>(cur.pos_max));
+
+        server_ckpt_write_buf(os, cur.data_tgt);
+        server_ckpt_write_buf(os, cur.data_dft);
+        server_ckpt_write_buf(os, cur.data_spec);
+    }
+
+    if (!os) {
+        SRV_WRN("failed while writing '%s', context checkpoints may be incomplete\n", path.c_str());
+    }
+}
+
+// n_tokens_prompt must match the state file this sidecar accompanies, otherwise
+// the checkpoints describe positions that no longer exist in the restored slot.
+static std::list<common_prompt_checkpoint> server_slot_ckpt_load(
+        const std::string & filepath,
+        uint64_t n_tokens_prompt,
+        uint64_t n_bytes_max) {
+    std::list<common_prompt_checkpoint> res;
+
+    const std::string path = server_slot_ckpt_path(filepath);
+
+    std::ifstream is(path, std::ios::binary);
+    if (!is) {
+        // no sidecar (e.g. saved by an older build) - restore without checkpoints
+        return res;
+    }
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t n_tokens_file = 0;
+    uint64_t n_ckpt = 0;
+
+    if (!server_ckpt_read_pod(is, magic)   || magic != SLOT_CKPT_MAGIC ||
+        !server_ckpt_read_pod(is, version) || version != SLOT_CKPT_VERSION ||
+        !server_ckpt_read_pod(is, n_tokens_file) ||
+        !server_ckpt_read_pod(is, n_ckpt)) {
+        SRV_WRN("ignoring unreadable or unsupported checkpoint file '%s'\n", path.c_str());
+        return res;
+    }
+
+    if (n_tokens_file != n_tokens_prompt) {
+        SRV_WRN("ignoring stale checkpoint file '%s' (%" PRIu64 " tokens, expected %" PRIu64 ")\n",
+                path.c_str(), n_tokens_file, n_tokens_prompt);
+        return res;
+    }
+
+    for (uint64_t i = 0; i < n_ckpt; ++i) {
+        common_prompt_checkpoint cur;
+
+        int64_t n_tokens = 0;
+        int32_t id_task  = 0;
+        int32_t pos_min  = 0;
+        int32_t pos_max  = 0;
+
+        if (!server_ckpt_read_pod(is, n_tokens) ||
+            !server_ckpt_read_pod(is, id_task)  ||
+            !server_ckpt_read_pod(is, pos_min)  ||
+            !server_ckpt_read_pod(is, pos_max)  ||
+            !server_ckpt_read_buf(is, cur.data_tgt,  n_bytes_max) ||
+            !server_ckpt_read_buf(is, cur.data_dft,  n_bytes_max) ||
+            !server_ckpt_read_buf(is, cur.data_spec, n_bytes_max)) {
+            SRV_WRN("truncated checkpoint file '%s', dropping %" PRIu64 " checkpoint(s)\n",
+                    path.c_str(), n_ckpt - i);
+            res.clear();
+            return res;
+        }
+
+        cur.n_tokens = n_tokens;
+        cur.id_task  = id_task;
+        cur.pos_min  = pos_min;
+        cur.pos_max  = pos_max;
+
+        res.push_back(std::move(cur));
+    }
+
+    return res;
+}
+
 static uint32_t server_n_outputs_max(const common_params & params) {
     const uint32_t n_batch  = params.n_batch;
 
@@ -2535,6 +2686,11 @@ private:
                     const size_t token_count = tokens.size();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
 
+                    // the state file carries tokens + KV cells only; context
+                    // checkpoints go beside it, or the restored slot cannot
+                    // rewind and has to reprocess the whole prompt
+                    server_slot_ckpt_save(filepath, slot->prompt.checkpoints, token_count);
+
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
 
@@ -2580,6 +2736,10 @@ private:
                     tokens.resize(token_count);
                     slot->prompt.clear();
                     slot->prompt.tokens.insert(tokens);
+
+                    // clear() above drops any checkpoints the slot still held;
+                    // reinstate the ones saved with this state file
+                    slot->prompt.checkpoints = server_slot_ckpt_load(filepath, token_count, nread);
 
                     const int64_t t_end = ggml_time_us();
                     const double t_restore_ms = (t_end - t_start) / 1000.0;
