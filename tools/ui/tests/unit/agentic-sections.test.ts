@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { deriveAgenticSections, hasAgenticContent } from '$lib/utils/agentic';
+import {
+	deriveAgenticSections,
+	hasAgenticContent,
+	reuseStableSections,
+	type AgenticSection
+} from '$lib/utils/agentic';
 import { AgenticSectionType, MessageRole } from '$lib/enums';
 import type { DatabaseMessage } from '$lib/types/database';
 import type { ApiChatCompletionToolCall } from '$lib/types/api';
@@ -276,5 +281,125 @@ describe('hasAgenticContent', () => {
 	it('returns false for empty toolCalls JSON', () => {
 		const msg = makeAssistant({ toolCalls: '[]' });
 		expect(hasAgenticContent(msg)).toBe(false);
+	});
+});
+
+describe('reuseStableSections', () => {
+	const tool = (result?: string): AgenticSection => ({
+		type: result ? AgenticSectionType.TOOL_CALL : AgenticSectionType.TOOL_CALL_PENDING,
+		content: result ?? '',
+		toolName: 'bash',
+		toolArgs: '{}',
+		toolResult: result,
+		toolCallId: 'call_1'
+	});
+
+	it('reuses the previous object for unchanged sections', () => {
+		const prev = [tool('done'), { type: AgenticSectionType.TEXT, content: 'a' }];
+		const next = [tool('done'), { type: AgenticSectionType.TEXT, content: 'ab' }];
+
+		const out = reuseStableSections(prev, next);
+
+		expect(out[0]).toBe(prev[0]);
+		expect(out[1]).toBe(next[1]);
+	});
+
+	it('keeps the fresh object when a section morphs', () => {
+		const prev = [tool()];
+		const next = [tool('done')];
+
+		const out = reuseStableSections(prev, next);
+
+		expect(out[0]).toBe(next[0]);
+	});
+
+	it('passes appended sections through', () => {
+		const prev = [tool('done')];
+		const next = [tool('done'), { type: AgenticSectionType.TEXT, content: 'after' }];
+
+		const out = reuseStableSections(prev, next);
+
+		expect(out).toHaveLength(2);
+		expect(out[0]).toBe(prev[0]);
+	});
+});
+
+describe('streaming derivation is append-only', () => {
+	// ChatMessageAgenticContent keys its section {#each} blocks by index, and
+	// per-index UI state (expandedStates) relies on it too. That is only sound
+	// while a streaming progression never inserts a section before an existing
+	// one - each step may only append, or morph the type at an existing index
+	// through these transitions.
+	const LEGAL_MORPHS: Record<string, AgenticSectionType[]> = {
+		[AgenticSectionType.REASONING_PENDING]: [AgenticSectionType.REASONING],
+		[AgenticSectionType.TOOL_CALL_PENDING]: [AgenticSectionType.TOOL_CALL],
+		[AgenticSectionType.TOOL_CALL_STREAMING]: [
+			AgenticSectionType.TOOL_CALL_PENDING,
+			AgenticSectionType.TOOL_CALL
+		]
+	};
+
+	function expectPrefixPreserving(prev: AgenticSection[], next: AgenticSection[]) {
+		expect(next.length).toBeGreaterThanOrEqual(prev.length);
+
+		for (let i = 0; i < prev.length; i++) {
+			const ok =
+				next[i].type === prev[i].type || LEGAL_MORPHS[prev[i].type]?.includes(next[i].type);
+
+			expect(ok, `index ${i}: ${prev[i].type} -> ${next[i].type}`).toBe(true);
+		}
+	}
+
+	it('holds across a full scripted turn progression', () => {
+		const toolCallJson = JSON.stringify([
+			{ id: 'call_1', type: 'function', function: { name: 'bash', arguments: '{"cmd":"ls"}' } }
+		]);
+
+		// Each step is (message state, toolMessages, isStreaming) as the
+		// pipeline would produce it, in order.
+		const steps: Array<[DatabaseMessage, DatabaseMessage[], boolean]> = [
+			[makeAssistant({ reasoningContent: 'Think' }), [], true],
+			[makeAssistant({ reasoningContent: 'Thinking more' }), [], true],
+			[makeAssistant({ reasoningContent: 'Thinking more', content: 'Listing' }), [], true],
+			[
+				makeAssistant({
+					reasoningContent: 'Thinking more',
+					content: 'Listing',
+					toolCalls: toolCallJson
+				}),
+				[],
+				true
+			],
+			[
+				makeAssistant({
+					reasoningContent: 'Thinking more',
+					content: 'Listing',
+					toolCalls: toolCallJson
+				}),
+				[makeToolMsg({ toolCallId: 'call_1', content: 'file1\nfile2' })],
+				true
+			],
+			[
+				makeAssistant({
+					reasoningContent: 'Thinking more',
+					content: 'Listing',
+					toolCalls: toolCallJson
+				}),
+				[
+					makeToolMsg({ toolCallId: 'call_1', content: 'file1\nfile2' }),
+					makeAssistant({ id: 'ast-2', content: 'Two files.' })
+				],
+				true
+			]
+		];
+
+		let prev: AgenticSection[] = [];
+
+		for (const [message, toolMessages, isStreaming] of steps) {
+			const next = deriveAgenticSections(message, toolMessages, [], isStreaming);
+
+			expectPrefixPreserving(prev, next);
+			prev = next;
+		}
 	});
 });

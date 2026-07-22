@@ -1,6 +1,7 @@
 # Agentic thread perf harness
 
-Two tiers, both reusing the existing vitest projects (see `vite.config.ts`).
+Two tiers, both reusing the existing vitest projects (see `vite.config.ts`),
+plus a cliff harness for step changes (below).
 
 ## Tier 1 - `agentic-stream.perf.svelte.test.ts` (project: `client`, real Chromium)
 
@@ -56,3 +57,35 @@ Per-call costs for the pure functions the curve implicates.
 ```
 npx vitest bench --project=unit --run tests/unit/agentic-hotpath.bench.ts
 ```
+
+## Cliff harness - `agentic-cliff.perf.svelte.test.ts` (project: `client`)
+
+For step changes rather than scaling curves: each scenario streams two phases
+in one run around an injected event (a completed tool call of parameterized
+result size, an expand, a turn crossing) and reports per-token cost before (A)
+and after (B) plus the B/A ratio. ~1.0 denies the hypothesis; >>1 confirms it.
+
+```
+npx vitest --project=client --run tests/client/agentic-cliff.perf.svelte.test.ts --reporter=verbose
+```
+
+Historical note: this harness located the post-tool-turn cliff (S2: an expanded
+512KB result cost ~100ms/token, 100x phase A, while the statically-suspected
+always-on scan was only 1.8x). Fixed by `reuseStableSections` keeping section
+object identity stable across tokens; all ratios now sit at ~1.0.
+
+## Scroll weight - `tool-result-scroll.perf.svelte.test.ts` (project: `client`)
+
+Measures the DOM weight of an EXPANDED large tool result: the one-time expand
+hitch, subtree node count, and frame deltas while driving scrollTop across the
+terminal clamp.
+
+```
+npx vitest --project=client --run tests/client/tool-result-scroll.perf.svelte.test.ts --reporter=verbose
+```
+
+Historical note: this refuted virtual scrolling for tool results. Frame deltas
+are flat from 16KB (297 nodes) to 2MB (37k nodes) - clamp scrolling is
+composited, so node count does not affect it. The only size-scaling cost is the
+one-time expand hitch (4ms @ 16KB, 81ms @ 512KB, 275ms @ 2MB); line-capping
+would address that if it ever matters, virtualization buys nothing.

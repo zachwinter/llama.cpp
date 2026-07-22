@@ -12,7 +12,7 @@
 		ChatMessageAgenticTurnStats,
 		DatabaseMessage
 	} from '$lib/types';
-	import { deriveAgenticSections, type AgenticSection } from '$lib/utils';
+	import { deriveAgenticSections, reuseStableSections, type AgenticSection } from '$lib/utils';
 	import {
 		agenticPendingPermissionRequest,
 		agenticResolvePermission,
@@ -93,7 +93,18 @@
 		agenticResolveContinue(message.convId, shouldContinue);
 	}
 
-	const sections = $derived(deriveAgenticSections(message, toolMessages, [], isStreaming));
+	// Derivation runs per streamed token and builds fresh section objects;
+	// reusing the previous object for unchanged sections keeps prop identity
+	// stable so completed blocks skip their per-token rework entirely.
+	let prevSections: AgenticSection[] = [];
+	const sections = $derived.by(() => {
+		prevSections = reuseStableSections(
+			prevSections,
+			deriveAgenticSections(message, toolMessages, [], isStreaming)
+		);
+
+		return prevSections;
+	});
 
 	const currentlyExecutingToolCallId = $derived(
 		isStreaming ? agenticExecutingToolCallId(message.convId) : null
@@ -210,6 +221,8 @@
 			{@const turnStats = message?.timings?.agentic?.perTurn?.[turnIndex]}
 
 			<div class="agentic-turn group/turn grid gap-2">
+				<!-- Index keys are load-bearing: sections and expandedStates rely on the
+				     derivation being append-only (tests/unit/agentic-sections.test.ts). -->
 				{#each turn.sections as section, sIdx (turn.flatIndices[sIdx])}
 					{@render renderSection(section, turn.flatIndices[sIdx])}
 				{/each}
@@ -232,6 +245,7 @@
 			</div>
 		{/each}
 	{:else}
+		<!-- Index keys are load-bearing: see note on the multi-turn branch above. -->
 		{#each sections as section, index (index)}
 			{@render renderSection(section, index)}
 		{/each}

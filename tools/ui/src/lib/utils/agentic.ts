@@ -186,6 +186,39 @@ export function deriveAgenticSections(
 }
 
 /**
+ * Reuse prior section objects when re-derivation produced an identical section
+ * at the same index. Streaming re-derives sections per token; keeping `===`
+ * identity for unchanged sections lets every $derived downstream of a section
+ * prop (tool-call blocks, reasoning blocks) skip re-running.
+ */
+export function reuseStableSections(
+	prev: AgenticSection[],
+	next: AgenticSection[]
+): AgenticSection[] {
+	const n = Math.min(prev.length, next.length);
+
+	for (let i = 0; i < n; i++) {
+		const p = prev[i];
+		const s = next[i];
+
+		if (
+			p.type === s.type &&
+			p.content === s.content &&
+			p.toolName === s.toolName &&
+			p.toolArgs === s.toolArgs &&
+			p.toolResult === s.toolResult &&
+			p.toolResultExtras === s.toolResultExtras &&
+			p.toolCallId === s.toolCallId &&
+			p.wasInterrupted === s.wasInterrupted
+		) {
+			next[i] = p;
+		}
+	}
+
+	return next;
+}
+
+/**
  * Build the raw text representation shown in the "raw output" view of an
  * assistant message. Each section is formatted as it would appear in the
  * model-facing transcript, joined by blank lines.
@@ -372,17 +405,34 @@ function looksLikeMarkdown(content: string): boolean {
 
 /**
  * Safely parse the toolCalls JSON string from a DatabaseMessage.
+ *
+ * Memoized by the JSON string: section derivation and hasAgenticContent both
+ * run per streamed token, and toolCalls can embed whole files (write_file).
  */
+const parseToolCallsCache = new Map<string, ApiChatCompletionToolCall[]>();
+const PARSE_TOOL_CALLS_CACHE_MAX = 64;
+
 function parseToolCalls(toolCallsJson?: string): ApiChatCompletionToolCall[] {
 	if (!toolCallsJson) return [];
+
+	const cached = parseToolCallsCache.get(toolCallsJson);
+
+	if (cached) return cached;
+
+	let result: ApiChatCompletionToolCall[] = [];
 
 	try {
 		const parsed = JSON.parse(toolCallsJson);
 
-		return Array.isArray(parsed) ? parsed : [];
+		if (Array.isArray(parsed)) result = parsed;
 	} catch {
-		return [];
+		// keep []
 	}
+
+	if (parseToolCallsCache.size >= PARSE_TOOL_CALLS_CACHE_MAX) parseToolCallsCache.clear();
+	parseToolCallsCache.set(toolCallsJson, result);
+
+	return result;
 }
 
 /**
