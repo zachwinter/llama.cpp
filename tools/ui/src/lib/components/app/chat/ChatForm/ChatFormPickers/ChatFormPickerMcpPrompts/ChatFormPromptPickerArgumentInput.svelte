@@ -68,7 +68,7 @@
 			class="absolute top-full right-0 left-0 z-10 mt-1 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-background shadow-lg"
 			transition:fly={{ y: -5, duration: 100 }}
 		>
-			{#each suggestions as suggestion, i (suggestion)}
+			{#each suggestions as suggestion, i (i)}
 				<button
 					type="button"
 					onmousedown={() => onSelectSuggestion(suggestion)}

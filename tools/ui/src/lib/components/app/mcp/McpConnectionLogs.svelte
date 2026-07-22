@@ -52,7 +52,7 @@
 			<div
 				class="max-h-64 space-y-0.5 overflow-y-auto rounded bg-muted/50 p-2 font-mono text-[10px]"
 			>
-				{#each logs as log (log.timestamp.getTime() + log.message)}
+				{#each logs as log, i (i)}
 					{@const IconComponent = getMcpLogLevelIcon(log.level)}
 
 					<div class={['flex items-start gap-1.5', getMcpLogLevelClass(log.level)]}>

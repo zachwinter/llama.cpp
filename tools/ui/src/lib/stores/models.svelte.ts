@@ -715,18 +715,22 @@ class ModelsStore {
 					const reader = response.body.getReader();
 					let buffer = '';
 
-					while (!signal.aborted) {
-						const { value, done } = await reader.read();
-						if (done) break;
+					try {
+						while (!signal.aborted) {
+							const { value, done } = await reader.read();
+							if (done) break;
 
-						buffer += decoder.decode(value, { stream: true });
+							buffer += decoder.decode(value, { stream: true });
 
-						let boundary = buffer.indexOf(SSE_RECORD_SEPARATOR);
-						while (boundary !== -1) {
-							this.handleStatusRecord(buffer.slice(0, boundary));
-							buffer = buffer.slice(boundary + SSE_RECORD_SEPARATOR.length);
-							boundary = buffer.indexOf(SSE_RECORD_SEPARATOR);
+							let boundary = buffer.indexOf(SSE_RECORD_SEPARATOR);
+							while (boundary !== -1) {
+								this.handleStatusRecord(buffer.slice(0, boundary));
+								buffer = buffer.slice(boundary + SSE_RECORD_SEPARATOR.length);
+								boundary = buffer.indexOf(SSE_RECORD_SEPARATOR);
+							}
 						}
+					} finally {
+						await reader.cancel().catch(() => {});
 					}
 				}
 			} catch {

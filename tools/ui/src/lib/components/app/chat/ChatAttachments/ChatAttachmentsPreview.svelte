@@ -88,11 +88,13 @@
 
 	$effect(() => {
 		const index = currentIndex;
-		setTimeout(() => {
+		const id = setTimeout(() => {
 			const thumbnail = document.querySelector(`[data-thumbnail-index="${index}"]`);
 
 			thumbnail?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
 		}, 0);
+
+		return () => clearTimeout(id);
 	});
 
 	let currentItem = $derived(allItems[currentIndex] ?? null);

@@ -230,6 +230,7 @@
 
 		const copyButtons = containerRef.querySelectorAll<HTMLButtonElement>('.copy-code-btn');
 		const previewButtons = containerRef.querySelectorAll<HTMLButtonElement>('.preview-code-btn');
+		const boundImages = containerRef.querySelectorAll<HTMLImageElement>('img[data-error-bound]');
 
 		for (const button of copyButtons) {
 			button.removeEventListener('click', handleCopyClick);
@@ -237,6 +238,10 @@
 
 		for (const button of previewButtons) {
 			button.removeEventListener('click', handlePreviewClick);
+		}
+
+		for (const img of boundImages) {
+			img.removeEventListener('error', handleImageError);
 		}
 	}
 

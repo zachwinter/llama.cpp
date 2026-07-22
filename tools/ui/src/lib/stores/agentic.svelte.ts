@@ -318,13 +318,23 @@ class AgenticStore {
 
 		return new Promise<ToolPermissionDecision>((resolve) => {
 			if (signal?.aborted) {
-				this._pendingPermissions.set(conversationId, null);
+				this._pendingPermissions.delete(conversationId);
 				resolve(ToolPermissionDecision.DENY);
 				return;
 			}
 
+			const onAbort = () => {
+				const resolver = this._permissionResolvers.get(conversationId);
+				if (resolver) {
+					this._permissionResolvers.delete(conversationId);
+					this._pendingPermissions.delete(conversationId);
+					resolve(ToolPermissionDecision.DENY);
+				}
+			};
+
 			this._permissionResolvers.set(conversationId, (decision) => {
-				this._pendingPermissions.set(conversationId, null);
+				signal?.removeEventListener('abort', onAbort);
+				this._pendingPermissions.delete(conversationId);
 				if (decision === ToolPermissionDecision.ALWAYS && permissionKey) {
 					permissionsStore.allowTool(permissionKey);
 				} else if (decision === ToolPermissionDecision.ALWAYS_SERVER) {
@@ -341,18 +351,7 @@ class AgenticStore {
 				resolve(decision);
 			});
 
-			signal?.addEventListener(
-				'abort',
-				() => {
-					const resolver = this._permissionResolvers.get(conversationId);
-					if (resolver) {
-						this._permissionResolvers.delete(conversationId);
-						this._pendingPermissions.set(conversationId, null);
-						resolve(ToolPermissionDecision.DENY);
-					}
-				},
-				{ once: true }
-			);
+			signal?.addEventListener('abort', onAbort, { once: true });
 		});
 	}
 
@@ -361,28 +360,27 @@ class AgenticStore {
 
 		return new Promise<boolean>((resolve) => {
 			if (signal?.aborted) {
-				this._pendingContinueRequests.set(conversationId, false);
+				this._pendingContinueRequests.delete(conversationId);
 				resolve(false);
 				return;
 			}
 
+			const onAbort = () => {
+				const resolver = this._continueResolvers.get(conversationId);
+				if (resolver) {
+					this._continueResolvers.delete(conversationId);
+					this._pendingContinueRequests.delete(conversationId);
+					resolve(false);
+				}
+			};
+
 			this._continueResolvers.set(conversationId, (shouldContinue) => {
-				this._pendingContinueRequests.set(conversationId, false);
+				signal?.removeEventListener('abort', onAbort);
+				this._pendingContinueRequests.delete(conversationId);
 				resolve(shouldContinue);
 			});
 
-			signal?.addEventListener(
-				'abort',
-				() => {
-					const resolver = this._continueResolvers.get(conversationId);
-					if (resolver) {
-						this._continueResolvers.delete(conversationId);
-						this._pendingContinueRequests.set(conversationId, false);
-						resolve(false);
-					}
-				},
-				{ once: true }
-			);
+			signal?.addEventListener('abort', onAbort, { once: true });
 		});
 	}
 
@@ -390,9 +388,9 @@ class AgenticStore {
 		const { conversationId, messages, options = {}, callbacks, signal, perChatOverrides } = params;
 
 		// Clear any pending permissions/continue requests for this conversation when starting a new flow
-		this._pendingPermissions.set(conversationId, null);
+		this._pendingPermissions.delete(conversationId);
 		this._permissionResolvers.delete(conversationId);
-		this._pendingContinueRequests.set(conversationId, false);
+		this._pendingContinueRequests.delete(conversationId);
 		this._continueResolvers.delete(conversationId);
 		this._steeringMessages.delete(conversationId);
 

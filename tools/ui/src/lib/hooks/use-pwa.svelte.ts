@@ -1,3 +1,4 @@
+import { onDestroy } from 'svelte';
 import { browser } from '$app/environment';
 import { useRegisterSW } from 'virtual:pwa-register/svelte';
 import { versionStore } from '$lib/stores/version.svelte';
@@ -14,6 +15,12 @@ import { SW_CONFIG } from '$lib/constants/pwa';
 export function usePwa() {
 	let swCheckInterval: ReturnType<typeof setInterval> | null = null;
 	let needRefreshByStorage = $state(false);
+
+	onDestroy(() => {
+		if (swCheckInterval) {
+			clearInterval(swCheckInterval);
+		}
+	});
 
 	const {
 		// offlineReady, // to do - add installation banners for iOS
